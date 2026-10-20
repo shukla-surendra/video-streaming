@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>vstream player</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
+<body style="font-family:sans-serif;background:#111;color:#eee">
+<video id="v" controls muted autoplay style="width:100%;max-width:960px"></video>
+<p id="info">loading…</p>
+<script>
+  // ?src=hls/index.m3u8 (lesson 03) or ?src=abr/master.m3u8 (lesson 04)
+  const src = '/media/' + (new URLSearchParams(location.search).get('src') || 'hls/index.m3u8');
+  const hls = new Hls();
+  hls.loadSource(src);
+  hls.attachMedia(document.getElementById('v'));
+  hls.on(Hls.Events.LEVEL_SWITCHED, (_, d) => {
+    const l = hls.levels[d.level];
+    info.textContent = `${src} — now playing ${l.height}p @ ${Math.round(l.bitrate / 1000)} kbps`;
+  });
+</script>
