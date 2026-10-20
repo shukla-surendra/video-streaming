@@ -1,0 +1,50 @@
+# Viewer site. Also a tiny CDN edge: segments are cached here, and
+# proxy_cache_lock means 1,000 viewers missing the same segment at once cause
+# ONE request to the backend — lesson 05's request coalescing, in nginx.
+proxy_cache_path /var/cache/nginx/stream levels=1:2 keys_zone=stream:10m
+                 max_size=2g inactive=10m use_temp_path=off;
+
+server {
+    listen 80;
+    root /usr/share/nginx/html;
+
+    location = /         { try_files /index.html =404; }
+    location = /watch    { try_files /watch.html =404; }
+    location /static/    { expires 1h; }
+    location = /static/config.js {
+        default_type application/javascript;
+        add_header Cache-Control no-cache;
+        return 200 "window.VSTREAM = { siteUrl: '${SITE_URL}', adminUrl: '${ADMIN_URL}' };\n";
+    }
+
+    # Viewers never reach the admin API through this site.
+    location /api/admin/ { return 404; }
+
+    location /api/ {
+        proxy_pass http://${BACKEND_ADDR};
+    }
+
+    location /stream/ {
+        proxy_pass http://${BACKEND_ADDR};
+        proxy_cache stream;
+        proxy_cache_lock on;
+        proxy_cache_valid 200 10m;
+        proxy_cache_valid 404 5s;
+        add_header X-Cache $upstream_cache_status; # HIT / MISS — watch it in DevTools
+    }
+
+    # Live: the backend says playlists may be cached for 1 s and segments for 1 h
+    # (Cache-Control). Micro-caching the playlist + the lock = however many
+    # viewers there are, the backend sees ~1 playlist request per second per rung.
+    location /livestream/ {
+        proxy_pass http://${BACKEND_ADDR};
+        proxy_cache stream;
+        proxy_cache_lock on;
+        proxy_cache_lock_timeout 2s;
+        # Serve-stale-while-refreshing is bounded by the backend's
+        # stale-while-revalidate=2; a blanket `proxy_cache_use_stale updating`
+        # would hand a new broadcast's viewers the previous broadcast's playlist.
+        proxy_cache_background_update on;
+        add_header X-Cache $upstream_cache_status;
+    }
+}

@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Watch · vstream</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/config.js"></script>
+<script src="/static/common.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.7.3/dist/hls.min.js"></script>
+<body>
+<main id="main" class="watch-layout">
+  <div>
+    <div class="player-wrap">
+      <video id="video" class="player" controls playsinline></video>
+      <div id="offline" class="offline-msg" hidden></div>
+    </div>
+    <div class="watch-meta">
+      <h1 id="title"></h1>
+      <label class="flex" style="margin:0">Quality
+        <select id="quality"><option value="-1">Auto</option></select>
+      </label>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="stats" id="resume" hidden></div>
+    <div class="desc" id="desc" hidden></div>
+  </div>
+  <aside class="up-next" id="upNext" hidden>
+    <h2>Up next</h2>
+    <div id="upNextList"></div>
+  </aside>
+</main>
+<script>
+  document.body.prepend(header());
+  const params = new URLSearchParams(location.search);
+  const video = $('#video'), quality = $('#quality'), stats = $('#stats'), offline = $('#offline');
+  let hls = null;
+  let meta = '', levelInfo = '';
+
+  const notFound = () => $('#main').replaceChildren(el('div', { class: 'empty' },
+    'Not found. ', el('a', { href: '/', style: 'color:var(--accent)' }, 'Back to videos'), '.'));
+
+  function showInfo(v) {
+    document.title = v.title + ' · vstream';
+    $('#title').textContent = v.title;
+    if (v.description) { $('#desc').textContent = v.description; $('#desc').hidden = false; }
+  }
+
+  function startPlayer(src, live) {
+    stopPlayer();
+    if (window.Hls && Hls.isSupported()) {
+      // Live: stay ~3 segments (~6 s) behind the edge — close to live, but with
+      // enough buffer to ride out a slow segment.
+      hls = new Hls(live ? { liveSyncDurationCount: 3, liveMaxLatencyDurationCount: 8 } : {});
+      hls.loadSource(src);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        quality.replaceChildren(el('option', { value: -1 }, 'Auto'));
+        // Highest rung first, like YouTube's menu.
+        hls.levels.map((l, i) => [l, i]).sort((a, b) => b[0].height - a[0].height)
+          .forEach(([l, i]) => quality.append(el('option', { value: i }, `${l.height}p`)));
+        if (live) video.play().catch(() => {});
+      });
+      // "Auto" = let ABR choose (lesson 04); picking a rung pins it.
+      quality.onchange = () => { hls.currentLevel = +quality.value; };
+      hls.on(Hls.Events.LEVEL_SWITCHED, (_, d) => {
+        const l = hls.levels[d.level];
+        levelInfo = ` · playing ${l.height}p @ ${Math.round(l.bitrate / 1000)} kbps` + (hls.autoLevelEnabled ? ' (auto)' : '');
+        stats.textContent = meta + levelInfo;
+      });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = src; // Safari / iOS play HLS natively and do ABR themselves
+      quality.parentElement.hidden = true;
+      if (live) video.play().catch(() => {});
+    }
+  }
+
+  function stopPlayer() {
+    if (hls) { hls.destroy(); hls = null; }
+    levelInfo = '';
+    video.removeAttribute('src'); video.load();
+  }
+
+  // ---- on-demand video ----
+  function watchVideo(id) {
+    fetch('/api/videos/' + encodeURIComponent(id))
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(v => {
+        showInfo(v);
+        video.poster = v.thumbnail;
+        meta = `${fmtCount(v.views)} views · ${fmtDuration(v.duration_secs)} · uploaded ${fmtAgo(v.created_at)}`;
+        stats.textContent = meta;
+        startPlayer(v.playlist, false);
+        countView(v);
+        rememberPosition(v);
+        showUpNext(v.id);
+      })
+      .catch(notFound);
+  }
+
+  // One view per video per browser tab session, counted once playback really starts.
+  function countView(v) {
+    video.addEventListener('playing', () => {
+      const key = 'vstream-viewed-' + v.id;
+      try { if (sessionStorage.getItem(key)) return; sessionStorage.setItem(key, '1'); } catch {}
+      fetch(`/api/videos/${encodeURIComponent(v.id)}/view`, { method: 'POST' })
+        .then(r => r.json()).then(d => {
+          meta = meta.replace(/^[^·]+views/, `${fmtCount(d.views)} views`);
+          stats.textContent = meta + levelInfo;
+        }).catch(() => {});
+    }, { once: true });
+  }
+
+  // Pick up where you left off (stored in this browser only).
+  function rememberPosition(v) {
+    const key = 'vstream-pos-' + v.id;
+    const read = () => { try { return +localStorage.getItem(key) || 0; } catch { return 0; } };
+    const write = t => { try { t ? localStorage.setItem(key, String(Math.floor(t))) : localStorage.removeItem(key); } catch {} };
+    const saved = read();
+    if (saved > 10 && saved < v.duration_secs - 15) {
+      video.addEventListener('loadedmetadata', () => { video.currentTime = saved; }, { once: true });
+      const resume = $('#resume');
+      resume.replaceChildren(`Resumed at ${fmtDuration(saved)} · `,
+        el('button', { class: 'resume', onclick: () => { video.currentTime = 0; resume.hidden = true; } }, 'Start over'));
+      resume.hidden = false;
+    }
+    let last = 0;
+    video.addEventListener('timeupdate', () => {
+      if (Math.abs(video.currentTime - last) >= 5) { last = video.currentTime; write(last); }
+    });
+    video.addEventListener('ended', () => write(0));
+    addEventListener('pagehide', () => { if (!video.ended) write(video.currentTime); });
+  }
+
+  function showUpNext(currentId) {
+    fetch('/api/videos').then(r => r.json()).then(all => {
+      const next = all.filter(v => v.id !== currentId).slice(0, 8);
+      if (!next.length) return;
+      $('#upNextList').replaceChildren(...next.map(v =>
+        el('a', { class: 'mini', href: '/watch?v=' + encodeURIComponent(v.id) },
+          el('div', { class: 'thumb' },
+            el('img', { src: v.thumbnail, alt: '', loading: 'lazy' }),
+            el('span', { class: 'badge' }, fmtDuration(v.duration_secs))),
+          el('div', {}, el('h3', {}, v.title), el('p', {}, `${fmtCount(v.views)} views · ${fmtAgo(v.created_at)}`)))));
+      $('#upNext').hidden = false;
+    }).catch(() => {});
+  }
+
+  // ---- live stream ----
+  // Poll the stream's status: start the player when it goes on air, show a
+  // message when it goes off. While playing, the poll doubles as the
+  // "I'm still watching" heartbeat behind the viewer count.
+  function watchLive(id) {
+    const viewer = (crypto.randomUUID && crypto.randomUUID()) || String(Math.random()).slice(2);
+    let playing = false, first = true;
+    async function tick() {
+      let s;
+      try {
+        const r = await fetch('/api/live/' + encodeURIComponent(id));
+        if (r.status === 404) return first ? notFound() : ended('This stream was deleted.');
+        s = await r.json();
+      } catch { return setTimeout(tick, 5000); }
+      if (first) { showInfo(s); first = false; }
+
+      if (s.status === 'live') {
+        let viewers = s.viewers;
+        try {
+          const hb = await fetch(`/api/live/${encodeURIComponent(id)}/heartbeat`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewer }),
+          });
+          viewers = (await hb.json()).viewers;
+        } catch {}
+        meta = `🔴 LIVE · ${viewers} watching · started ${fmtAgo(s.started_at)}`;
+        stats.textContent = meta + levelInfo;
+        if (!playing) {
+          playing = true; offline.hidden = true;
+          startPlayer(s.playlist, true);
+        }
+        setTimeout(tick, 10000);
+      } else {
+        if (playing) { playing = false; stopPlayer(); }
+        ended(s.status === 'starting' ? 'Starting… the stream will begin in a few seconds.'
+          : 'This stream is offline. It will start here automatically when the broadcast begins.');
+        stats.textContent = '';
+        setTimeout(tick, 3000);
+      }
+    }
+    tick();
+  }
+
+  function ended(msg) {
+    offline.textContent = msg;
+    offline.hidden = false;
+  }
+
+  if (params.get('live')) watchLive(params.get('live'));
+  else if (params.get('v')) watchVideo(params.get('v'));
+  else notFound();
+</script>
+</body>
+</html>

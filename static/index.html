@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vstream</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/config.js"></script>
+<script src="/static/common.js"></script>
+<body>
+<main>
+  <section id="liveSection" hidden>
+    <h2><span class="live-dot"></span>Live now</h2>
+    <div id="liveGrid" class="grid"></div>
+  </section>
+  <section>
+    <div class="toolbar">
+      <h1>Videos</h1>
+      <input id="search" type="search" placeholder="Search videos" aria-label="Search videos">
+      <select id="sort" aria-label="Sort by">
+        <option value="new">Newest</option>
+        <option value="views">Most viewed</option>
+        <option value="old">Oldest</option>
+      </select>
+    </div>
+    <div id="grid" class="grid"></div>
+  </section>
+</main>
+<script>
+  document.body.prepend(header('home'));
+
+  // Streams come and go, so check every 15 s.
+  function loadLive() {
+    fetch('/api/live').then(r => r.json()).then(streams => {
+      $('#liveSection').hidden = !streams.length;
+      $('#liveGrid').replaceChildren(...streams.map(s =>
+        el('a', { class: 'card', href: '/watch?live=' + encodeURIComponent(s.id) },
+          el('div', { class: 'thumb' },
+            el('div', { class: 'live-thumb' }, s.title),
+            el('span', { class: 'live-badge' }, 'LIVE'),
+            el('span', { class: 'badge' }, `${s.viewers} watching`)),
+          el('h3', {}, s.title),
+          el('p', {}, `Started ${fmtAgo(s.started_at)}`))));
+    }).catch(() => {}).finally(() => setTimeout(loadLive, 15000));
+  }
+  loadLive();
+
+  // The whole catalog is small enough to search and sort in the browser.
+  let videos = [];
+  const search = $('#search'), sort = $('#sort');
+  const params = new URLSearchParams(location.search);
+  search.value = params.get('q') || '';
+  sort.value = params.get('sort') || 'new';
+
+  function renderVideos() {
+    const grid = $('#grid');
+    if (!videos.length) {
+      grid.replaceChildren(el('div', { class: 'empty', style: 'grid-column:1/-1' },
+        'No videos yet. ', el('a', { href: adminUrl('/admin'), style: 'color:var(--accent)' }, 'Upload one'), '.'));
+      return;
+    }
+    const words = search.value.toLowerCase().split(/\s+/).filter(Boolean);
+    const shown = videos
+      .filter(v => words.every(w => (v.title + ' ' + v.description).toLowerCase().includes(w)))
+      .sort({
+        new: (a, b) => b.created_at - a.created_at,
+        old: (a, b) => a.created_at - b.created_at,
+        views: (a, b) => b.views - a.views || b.created_at - a.created_at,
+      }[sort.value]);
+    if (!shown.length) {
+      grid.replaceChildren(el('div', { class: 'empty', style: 'grid-column:1/-1' }, `No videos match "${search.value}".`));
+      return;
+    }
+    grid.replaceChildren(...shown.map(v =>
+      el('a', { class: 'card', href: '/watch?v=' + encodeURIComponent(v.id) },
+        el('div', { class: 'thumb' },
+          el('img', { src: v.thumbnail, alt: '', loading: 'lazy' }),
+          el('span', { class: 'badge' }, fmtDuration(v.duration_secs))),
+        el('h3', {}, v.title),
+        el('p', {}, `${fmtCount(v.views)} views · ${fmtAgo(v.created_at)}`))));
+  }
+
+  // Keep search + sort in the URL, so Back and shared links restore them.
+  function onFilter() {
+    const p = new URLSearchParams();
+    if (search.value) p.set('q', search.value);
+    if (sort.value !== 'new') p.set('sort', sort.value);
+    history.replaceState(null, '', p.size ? '?' + p : location.pathname);
+    renderVideos();
+  }
+  search.oninput = onFilter;
+  sort.onchange = onFilter;
+
+  fetch('/api/videos').then(r => r.json()).then(v => { videos = v; renderVideos(); });
+</script>
+</body>
+</html>

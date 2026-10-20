@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin · vstream</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/config.js"></script>
+<script src="/static/common.js"></script>
+<body>
+<main>
+  <section class="panel" id="login" hidden>
+    <h1>Admin sign-in</h1>
+    <p class="muted">Paste the admin token. It's the <code>ADMIN_TOKEN</code> env var, or the one the server printed at startup.</p>
+    <form id="loginForm" class="flex">
+      <input id="token" type="password" placeholder="Admin token" autocomplete="current-password" required>
+      <button class="primary">Sign in</button>
+    </form>
+    <p class="error" id="loginError"></p>
+  </section>
+
+  <div id="app" hidden>
+    <section class="panel">
+      <div class="flex" style="justify-content:space-between">
+        <h1 style="margin:0">Upload a video</h1>
+        <button id="logout">Sign out</button>
+      </div>
+      <form id="uploadForm">
+        <label for="title">Title</label>
+        <input id="title" maxlength="200" placeholder="Defaults to the file name">
+        <label for="description">Description</label>
+        <textarea id="description" maxlength="5000"></textarea>
+        <label>File</label>
+        <div class="drop" id="drop" tabindex="0">
+          <strong>Drop a video here</strong> or click to choose (MP4, MOV, MKV, WebM…)
+          <div id="fileName" class="muted"></div>
+        </div>
+        <input id="file" type="file" accept="video/*" hidden>
+        <div id="uploadProgress" hidden>
+          <div class="bar"><div></div></div>
+          <div class="muted" id="uploadText" style="font-size:13px"></div>
+        </div>
+        <p class="error" id="uploadError"></p>
+        <button class="primary" id="uploadBtn" disabled>Upload</button>
+      </form>
+    </section>
+
+    <section class="panel">
+      <h1>Live streams</h1>
+      <form id="liveForm" class="flex">
+        <input id="liveTitle" maxlength="200" placeholder="Stream title, e.g. Friday night match" required>
+        <button class="primary" style="white-space:nowrap">Create stream</button>
+      </form>
+      <p class="muted" style="font-size:13px">
+        In OBS: Settings → Stream → Service <strong>Custom</strong>, then paste the Server and Stream key.
+        Anyone with the key can broadcast on that stream, so keep it secret.
+      </p>
+      <p class="error" id="liveError"></p>
+      <div id="liveList"></div>
+    </section>
+
+    <section class="panel">
+      <h1>Library</h1>
+      <div id="list"></div>
+    </section>
+  </div>
+
+  <dialog id="editDialog">
+    <form id="editForm">
+      <h2 id="editHeading">Edit</h2>
+      <label for="editTitle">Title</label>
+      <input id="editTitle" maxlength="200" required>
+      <label for="editDescription">Description</label>
+      <textarea id="editDescription" maxlength="5000"></textarea>
+      <label class="check" id="editRecordRow">
+        <input type="checkbox" id="editRecord"> Save each broadcast to the library
+      </label>
+      <p class="error" id="editError"></p>
+      <div class="flex" style="justify-content:flex-end">
+        <button type="button" id="editCancel">Cancel</button>
+        <button class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+</main>
+<script>
+  document.body.prepend(header('admin'));
+  const store = {
+    get() { try { return localStorage.getItem('vstream-admin-token') || ''; } catch { return ''; } },
+    set(t) { try { t ? localStorage.setItem('vstream-admin-token', t) : localStorage.removeItem('vstream-admin-token'); } catch {} },
+  };
+  let token = store.get();
+  let pollTimer;
+
+  async function api(method, path, body) {
+    const headers = { Authorization: 'Bearer ' + token };
+    if (body) headers['Content-Type'] = 'application/json';
+    const r = await fetch('/api/admin' + path, { method, headers, body: body && JSON.stringify(body) });
+    if (r.status === 401) { signOut('Token was rejected.'); throw new Error('unauthorized'); }
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    return r.status === 204 ? null : r.json();
+  }
+
+  function signOut(msg = '') {
+    token = ''; store.set('');
+    clearTimeout(pollTimer); clearTimeout(livePollTimer);
+    $('#app').hidden = true; $('#login').hidden = false;
+    $('#loginError').textContent = msg;
+  }
+
+  async function signIn() {
+    $('#login').hidden = true; $('#app').hidden = false;
+    await Promise.all([refresh(), refreshLive()]);
+  }
+
+  $('#loginForm').onsubmit = e => {
+    e.preventDefault();
+    token = $('#token').value.trim(); store.set(token);
+    signIn().catch(() => {});
+  };
+  $('#logout').onclick = () => signOut();
+
+  // --- library ---
+  async function refresh() {
+    clearTimeout(pollTimer);
+    const videos = await api('GET', '/videos');
+    render(videos);
+    // While anything is transcoding, poll so the progress bars move.
+    if (videos.some(v => v.status === 'queued' || v.status === 'processing')) {
+      pollTimer = setTimeout(() => refresh().catch(() => {}), 1500);
+    }
+  }
+
+  function render(videos) {
+    const list = $('#list');
+    if (!videos.length) { list.replaceChildren(el('p', { class: 'muted' }, 'Nothing uploaded yet.')); return; }
+    list.replaceChildren(...videos.map(v => {
+      const ready = v.status === 'ready';
+      const busy = v.status === 'queued' || v.status === 'processing';
+      const thumb = el('div', { class: 'thumb' },
+        ready ? el('img', { src: `/stream/${v.id}/thumb.jpg`, alt: '' }) : null,
+        ready ? el('span', { class: 'badge' }, fmtDuration(v.duration_secs)) : null);
+      const info = el('div', {},
+        el('h3', {}, v.title),
+        el('div', { class: 'flex', style: 'font-size:13px' },
+          el('span', { class: 'status ' + v.status }, v.status + (v.status === 'processing' ? ` ${v.progress}%` : '')),
+          el('span', { class: 'muted' }, `${fmtBytes(v.source_bytes)} · ${fmtAgo(v.created_at)}` +
+            (ready ? ` · ${fmtCount(v.views)} views · ${v.renditions.join(', ')}` : ''))),
+        busy ? el('div', { class: 'bar' }, el('div', { style: `width:${v.progress}%` })) : null,
+        v.error ? el('div', { class: 'error' }, v.error) : null);
+      const actions = el('div', { class: 'actions' },
+        ready ? el('a', { class: 'btn', href: siteUrl('/watch?v=' + v.id) }, 'Watch') : null,
+        v.status === 'failed' ? el('button', { onclick: () => act('POST', `/videos/${v.id}/retry`) }, 'Retry') : null,
+        el('button', { onclick: () => openEditor('video', v) }, 'Edit'),
+        el('button', {
+          class: 'danger', disabled: v.status === 'processing' ? '' : null,
+          title: v.status === 'processing' ? 'Wait for transcoding to finish' : null,
+          onclick: () => confirm(`Delete "${v.title}"? This removes the file and all renditions.`) && act('DELETE', '/videos/' + v.id),
+        }, 'Delete'));
+      return el('div', { class: 'row' }, thumb, info, actions);
+    }));
+  }
+
+  async function act(method, path) {
+    try { await api(method, path); } catch (e) { if (e.message !== 'unauthorized') alert(e.message); }
+    refresh().catch(() => {});
+  }
+
+  // --- live ---
+  let livePollTimer;
+  async function refreshLive() {
+    clearTimeout(livePollTimer);
+    try { renderLive(await api('GET', '/live')); }
+    finally { if (token) livePollTimer = setTimeout(() => refreshLive().catch(() => {}), 3000); }
+  }
+
+  function copyField(label, value, secret) {
+    const code = el('code', { class: 'field-value' }, secret ? '•'.repeat(24) : value);
+    let shown = !secret;
+    return el('div', { class: 'field' },
+      el('span', { class: 'muted' }, label),
+      code,
+      secret ? el('button', { onclick: e => {
+        shown = !shown; code.textContent = shown ? value : '•'.repeat(24);
+        e.target.textContent = shown ? 'Hide' : 'Show';
+      } }, 'Show') : null,
+      el('button', { onclick: e => navigator.clipboard.writeText(value).then(() => {
+        e.target.textContent = 'Copied'; setTimeout(() => e.target.textContent = 'Copy', 1200);
+      }) }, 'Copy'));
+  }
+
+  // Re-rendering every 3 s would hide a key the admin just revealed, so only
+  // rebuild a row when something in it actually changed.
+  const liveRows = new Map();
+  function renderLive(streams) {
+    const list = $('#liveList');
+    if (!streams.length) { liveRows.clear(); list.replaceChildren(el('p', { class: 'muted' }, 'No live streams yet.')); return; }
+    list.replaceChildren(...streams.map(s => {
+      const sig = JSON.stringify(s);
+      const cached = liveRows.get(s.id);
+      if (cached && cached.sig === sig) return cached.node;
+      const label = s.status === 'live' ? `● live · ${s.viewers} watching` : s.status;
+      const node = el('div', { class: 'live-row' },
+        el('div', { class: 'flex', style: 'justify-content:space-between;flex-wrap:wrap' },
+          el('div', {},
+            el('h3', {}, s.title),
+            el('span', { class: 'status ' + s.status }, label),
+            s.status !== 'offline' && s.renditions.length
+              ? el('span', { class: 'muted', style: 'font-size:13px' }, ' · ' + s.renditions.join(', ')) : null,
+            el('span', { class: 'muted', style: 'font-size:13px' },
+              s.record ? ' · recording to library' : ' · not recorded')),
+          el('div', { class: 'actions' },
+            el('a', { class: 'btn', href: siteUrl('/watch?live=' + s.id), target: '_blank' }, 'Open'),
+            el('button', { onclick: () => openEditor('live', s) }, 'Edit'),
+            el('button', { onclick: () => confirm('Make a new stream key? The current broadcast stops and OBS must use the new key.')
+              && liveAct('POST', `/live/${s.id}/key`) }, 'New key'),
+            el('button', { class: 'danger', onclick: () => confirm(`Delete live stream "${s.title}"?`)
+              && liveAct('DELETE', '/live/' + s.id) }, 'Delete'))),
+        copyField('Server', s.rtmp_url),
+        copyField('Stream key', s.stream_key, true),
+        copyField('SRT', s.srt_url, true));
+      liveRows.set(s.id, { sig, node });
+      return node;
+    }));
+  }
+
+  async function liveAct(method, path, body) {
+    $('#liveError').textContent = '';
+    try { await api(method, path, body); } catch (e) { if (e.message !== 'unauthorized') $('#liveError').textContent = e.message; }
+    refreshLive().catch(() => {});
+  }
+
+  $('#liveForm').onsubmit = e => {
+    e.preventDefault();
+    liveAct('POST', '/live', { title: $('#liveTitle').value }).then(() => $('#liveForm').reset());
+  };
+
+  // --- edit dialog (videos and live streams) ---
+  const dialog = $('#editDialog');
+  let editing = null;
+  function openEditor(kind, item) {
+    editing = { kind, id: item.id };
+    $('#editHeading').textContent = kind === 'live' ? 'Edit live stream' : 'Edit video';
+    $('#editTitle').value = item.title;
+    $('#editDescription').value = item.description;
+    $('#editRecordRow').hidden = kind !== 'live';
+    $('#editRecord').checked = !!item.record;
+    $('#editError').textContent = '';
+    dialog.showModal();
+  }
+  $('#editCancel').onclick = () => dialog.close();
+  $('#editForm').onsubmit = async e => {
+    e.preventDefault();
+    const body = { title: $('#editTitle').value, description: $('#editDescription').value };
+    if (editing.kind === 'live') body.record = $('#editRecord').checked;
+    const path = (editing.kind === 'live' ? '/live/' : '/videos/') + editing.id;
+    try {
+      await api('PATCH', path, body);
+      dialog.close();
+      editing.kind === 'live' ? refreshLive().catch(() => {}) : refresh().catch(() => {});
+    } catch (err) {
+      if (err.message !== 'unauthorized') $('#editError').textContent = err.message;
+    }
+  };
+
+  // --- upload ---
+  const fileInput = $('#file'), drop = $('#drop');
+  let chosen = null;
+  function choose(f) {
+    chosen = f;
+    $('#fileName').textContent = f ? `${f.name} — ${fmtBytes(f.size)}` : '';
+    $('#uploadBtn').disabled = !f;
+    $('#uploadError').textContent = '';
+  }
+  drop.onclick = () => fileInput.click();
+  drop.onkeydown = e => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), fileInput.click());
+  fileInput.onchange = () => choose(fileInput.files[0]);
+  drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+  drop.ondragleave = () => drop.classList.remove('over');
+  drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); choose(e.dataTransfer.files[0]); };
+
+  $('#uploadForm').onsubmit = e => {
+    e.preventDefault();
+    if (!chosen) return;
+    const form = new FormData();
+    form.append('title', $('#title').value);
+    form.append('description', $('#description').value);
+    form.append('file', chosen); // last, so the text fields arrive before the big body
+
+    // XHR, not fetch: fetch can't report upload progress.
+    const xhr = new XMLHttpRequest();
+    const bar = $('#uploadProgress .bar > div'), text = $('#uploadText');
+    $('#uploadProgress').hidden = false; $('#uploadBtn').disabled = true;
+    const started = Date.now();
+    xhr.upload.onprogress = ev => {
+      if (!ev.lengthComputable) return;
+      const pct = ev.loaded / ev.total * 100;
+      const rate = ev.loaded / ((Date.now() - started) / 1000 || 1);
+      bar.style.width = pct + '%';
+      text.textContent = pct < 100
+        ? `${pct.toFixed(0)}% · ${fmtBytes(ev.loaded)} of ${fmtBytes(ev.total)} · ${fmtBytes(rate)}/s`
+        : 'Checking the file…';
+    };
+    xhr.onloadend = () => {
+      $('#uploadProgress').hidden = true; bar.style.width = '0';
+      if (xhr.status === 401) return signOut('Token was rejected.');
+      if (xhr.status === 201) {
+        $('#uploadForm').reset(); choose(null);
+        refresh().catch(() => {});
+      } else {
+        let msg = 'Upload failed';
+        try { msg = JSON.parse(xhr.responseText).error || msg; } catch {}
+        if (xhr.status === 0) msg = 'Upload failed: network error or the server stopped.';
+        $('#uploadError').textContent = msg;
+        $('#uploadBtn').disabled = false;
+      }
+    };
+    xhr.open('POST', '/api/admin/videos');
+    xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+    xhr.send(form);
+  };
+
+  token ? signIn().catch(() => {}) : signOut();
+</script>
+</body>
+</html>

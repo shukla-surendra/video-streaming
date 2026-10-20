@@ -1,0 +1,76 @@
+# docker compose up --build
+#   viewers  http://localhost:8080
+#   admin    http://localhost:8081   (sign in with ADMIN_TOKEN from .env)
+#   backend  http://localhost:3000   (API; also serves all pages, like `cargo run`)
+#   go live  OBS → rtmp://localhost:1935/live + stream key from the admin panel
+#            (or SRT on udp 8890)
+name: vstream
+
+x-web-env: &web-env
+  BACKEND_ADDR: backend:3000
+  SITE_URL: ${SITE_URL:-http://localhost:8080}
+  ADMIN_URL: ${ADMIN_URL:-http://localhost:8081}
+  VSTREAM_MAX_UPLOAD_MB: ${VSTREAM_MAX_UPLOAD_MB:-4096}
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env (see .env.example)}
+      VSTREAM_MAX_UPLOAD_MB: ${VSTREAM_MAX_UPLOAD_MB:-4096}
+      VSTREAM_WORKERS: ${VSTREAM_WORKERS:-1}
+      MEDIAMTX_RTSP: rtsp://mediamtx:8554
+      LIVE_RTMP_URL: ${LIVE_RTMP_URL:-rtmp://localhost:1935/live}
+      LIVE_SRT_URL: ${LIVE_SRT_URL:-srt://localhost:8890}
+    volumes:
+      - vstream-data:/data
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    init: true # forward Ctrl-C / docker stop to the server and ffmpeg
+    restart: unless-stopped
+
+  # Live ingest: accepts RTMP/SRT from broadcasters, asks the backend whether
+  # each stream key is valid, and hands the feed to the backend over RTSP.
+  mediamtx:
+    image: bluenviron/mediamtx:1.21.0
+    environment:
+      MTX_AUTHMETHOD: http
+      MTX_AUTHHTTPADDRESS: http://backend:3000/internal/mediamtx/auth
+      MTX_HLS: "no"    # the backend makes the HLS ladder
+      MTX_WEBRTC: "no"
+    ports:
+      - "${RTMP_PORT:-1935}:1935"     # RTMP (OBS)
+      - "${SRT_PORT:-8890}:8890/udp"  # SRT
+      # RTSP :8554 stays internal: only the backend reads raw feeds
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+      target: frontend
+    environment: *web-env
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  admin:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+      target: admin
+    environment: *web-env
+    ports:
+      - "${ADMIN_PORT:-8081}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  vstream-data: # uploads, HLS renditions, catalog.json — survives `down`; `down -v` wipes it
