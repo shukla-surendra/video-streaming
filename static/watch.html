@@ -6,7 +6,7 @@
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/config.js"></script>
 <script src="/static/common.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@1.7.3/dist/hls.min.js"></script>
+<script src="/static/vendor/hls-1.7.3.min.js"></script>
 <body>
 <main id="main" class="watch-layout">
   <div>
@@ -48,9 +48,16 @@
   function startPlayer(src, live) {
     stopPlayer();
     if (window.Hls && Hls.isSupported()) {
-      // Live: stay ~3 segments (~6 s) behind the edge — close to live, but with
-      // enough buffer to ride out a slow segment.
-      hls = new Hls(live ? { liveSyncDurationCount: 3, liveMaxLatencyDurationCount: 8 } : {});
+      hls = new Hls({
+        capLevelToPlayerSize: true, // a phone-sized player never downloads 720p+
+        ...(live ? {
+          // Sit 3 s behind the newest segment. After a Wi-Fi hiccup, catch up
+          // by playing up to 1.2x; if more than 6 s behind, jump.
+          liveSyncDuration: 3,
+          liveMaxLatencyDuration: 6,
+          maxLiveSyncPlaybackRate: 1.2,
+        } : {}),
+      });
       hls.loadSource(src);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -73,6 +80,22 @@
       if (live) video.play().catch(() => {});
     }
   }
+
+  // Seconds behind the newest frame the server has. hls.js knows exactly;
+  // for native players, use the end of the seekable range.
+  function behindLive() {
+    if (hls && hls.latency != null && isFinite(hls.latency)) return hls.latency;
+    if (video.seekable.length) return video.seekable.end(video.seekable.length - 1) - video.currentTime;
+    return null;
+  }
+
+  // Native players (iOS) never catch up on their own after a stall.
+  setInterval(() => {
+    if (hls || !playingLive || video.paused || !video.seekable.length) return;
+    const end = video.seekable.end(video.seekable.length - 1);
+    if (end - video.currentTime > 8) video.currentTime = end - 3;
+  }, 2000);
+  let playingLive = false;
 
   function stopPlayer() {
     if (hls) { hls.destroy(); hls = null; }
@@ -172,12 +195,12 @@
         meta = `🔴 LIVE · ${viewers} watching · started ${fmtAgo(s.started_at)}`;
         stats.textContent = meta + levelInfo;
         if (!playing) {
-          playing = true; offline.hidden = true;
+          playing = true; playingLive = true; offline.hidden = true;
           startPlayer(s.playlist, true);
         }
         setTimeout(tick, 10000);
       } else {
-        if (playing) { playing = false; stopPlayer(); }
+        if (playing) { playing = false; playingLive = false; stopPlayer(); }
         ended(s.status === 'starting' ? 'Starting… the stream will begin in a few seconds.'
           : 'This stream is offline. It will start here automatically when the broadcast begins.');
         stats.textContent = '';
@@ -186,6 +209,14 @@
     }
     tick();
   }
+
+  // Show the delay, so "it feels laggy" becomes a number.
+  setInterval(() => {
+    if (!playingLive) return;
+    const b = behindLive();
+    $('#resume').hidden = b == null;
+    if (b != null) $('#resume').textContent = `${b.toFixed(1)} s behind live`;
+  }, 1000);
 
   function ended(msg) {
     offline.textContent = msg;

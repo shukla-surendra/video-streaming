@@ -1,5 +1,12 @@
 # Admin panel. Kept on its own port/host so it can be firewalled or put
 # behind a VPN separately from the public viewer site.
+# Pages, scripts and playlists are text: compress them (hls.js is 600 KB raw,
+# ~190 KB gzipped). Video segments are already compressed, so leave them.
+gzip on;
+gzip_types application/javascript text/css application/json application/vnd.apple.mpegurl;
+gzip_min_length 1024;
+gzip_proxied any;
+
 server {
     listen 80;
     root /usr/share/nginx/html;
@@ -10,7 +17,9 @@ server {
     location = /static/config.js {
         default_type application/javascript;
         add_header Cache-Control no-cache;
-        return 200 "window.VSTREAM = { siteUrl: '${SITE_URL}', adminUrl: '${ADMIN_URL}' };\n";
+        # SITE_URL / ADMIN_URL unset → same host the browser used, so links work
+        # from a phone on the LAN (http://192.168.x.x:8080), not just "localhost".
+        return 200 "window.VSTREAM = {\n  siteUrl: '${SITE_URL}' || location.protocol + '//' + location.hostname + ':${FRONTEND_PORT}',\n  adminUrl: '${ADMIN_URL}' || location.protocol + '//' + location.hostname + ':${ADMIN_PORT}',\n};\n";
     }
 
     location /api/admin/ {

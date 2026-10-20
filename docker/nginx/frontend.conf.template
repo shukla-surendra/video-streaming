@@ -4,6 +4,13 @@
 proxy_cache_path /var/cache/nginx/stream levels=1:2 keys_zone=stream:10m
                  max_size=2g inactive=10m use_temp_path=off;
 
+# Pages, scripts and playlists are text: compress them (hls.js is 600 KB raw,
+# ~190 KB gzipped). Video segments are already compressed, so leave them.
+gzip on;
+gzip_types application/javascript text/css application/json application/vnd.apple.mpegurl;
+gzip_min_length 1024;
+gzip_proxied any;
+
 server {
     listen 80;
     root /usr/share/nginx/html;
@@ -14,7 +21,9 @@ server {
     location = /static/config.js {
         default_type application/javascript;
         add_header Cache-Control no-cache;
-        return 200 "window.VSTREAM = { siteUrl: '${SITE_URL}', adminUrl: '${ADMIN_URL}' };\n";
+        # SITE_URL / ADMIN_URL unset → same host the browser used, so links work
+        # from a phone on the LAN (http://192.168.x.x:8080), not just "localhost".
+        return 200 "window.VSTREAM = {\n  siteUrl: '${SITE_URL}' || location.protocol + '//' + location.hostname + ':${FRONTEND_PORT}',\n  adminUrl: '${ADMIN_URL}' || location.protocol + '//' + location.hostname + ':${ADMIN_PORT}',\n};\n";
     }
 
     # Viewers never reach the admin API through this site.

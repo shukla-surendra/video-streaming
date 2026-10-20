@@ -63,12 +63,12 @@ site (or the backend port directly). Behind real domains, set `SITE_URL` / `ADMI
 2. OBS → Settings → Stream → Service **Custom** → paste both → *Start Streaming*.
    (Or test without OBS: `ffmpeg -re -f lavfi -i testsrc2=size=1280x720:rate=30 -f lavfi -i sine -c:v libx264 -preset veryfast -g 60 -c:a aac -f flv rtmp://localhost:1935/live/<stream key>`)
 3. ~8 s later it's on the home page under **Live now**; viewers get 720p/480p/360p ABR,
-   ~6–10 s behind real time, with a live viewer count.
+   ~4 s behind real time (the watch page shows the exact figure), with a live viewer count.
 
 ```
 OBS ──RTMP/SRT──► MediaMTX ──"key ok?"──► backend /internal/mediamtx/auth
                      │
-                     └──RTSP (internal)──► backend ffmpeg: 1 input → 3 rungs, 2 s segments,
+                     └──RTSP (internal)──► backend ffmpeg: 1 input → 3 rungs, 1 s segments,
                                            20 s sliding window ──► /livestream/<id>/master.m3u8
                                                                         │
                                            frontend nginx: playlists cached 1 s, segments 1 h,
@@ -79,6 +79,10 @@ OBS ──RTMP/SRT──► MediaMTX ──"key ok?"──► backend /internal/
 ends, goes through the upload pipeline as "<title> (live recording)". Turn it off per
 stream with *Edit*. Broadcasts under 5 s aren't kept; the first ~4 s (while the backend
 waits for the feed) aren't in the recording.
+
+**Latency:** a frame is in a finished segment ~1 s after OBS sends it; the player sits
+3 s behind the newest segment. After a stall (Wi-Fi hiccup, paused tab) it catches up by
+playing at up to 1.2x, or jumps if it's more than 6 s behind — so delay doesn't pile up.
 
 *New key* stops the current broadcast immediately. If OBS drops and reconnects within
 10 s, the stream picks back up on its own. OBS on another machine or a phone: set

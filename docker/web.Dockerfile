@@ -7,6 +7,7 @@
 
 FROM nginx:1.30-alpine AS base
 COPY static/app.css static/common.js /usr/share/nginx/html/static/
+COPY static/vendor /usr/share/nginx/html/static/vendor
 
 FROM base AS frontend
 COPY static/index.html static/watch.html /usr/share/nginx/html/

@@ -8,8 +8,11 @@ name: vstream
 
 x-web-env: &web-env
   BACKEND_ADDR: backend:3000
-  SITE_URL: ${SITE_URL:-http://localhost:8080}
-  ADMIN_URL: ${ADMIN_URL:-http://localhost:8081}
+  # Empty = use whatever host the browser came in on (works from other devices).
+  SITE_URL: ${SITE_URL:-}
+  ADMIN_URL: ${ADMIN_URL:-}
+  FRONTEND_PORT: ${FRONTEND_PORT:-8080}
+  ADMIN_PORT: ${ADMIN_PORT:-8081}
   VSTREAM_MAX_UPLOAD_MB: ${VSTREAM_MAX_UPLOAD_MB:-4096}
 
 services:

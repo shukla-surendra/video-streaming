@@ -19,8 +19,10 @@ use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::Command, sync::{mpsc, Mu
 
 /// Live encoding has to keep up with real time, so the ladder tops out at 720p.
 const LADDER: [(&str, u32, u32); 3] = [("720p", 720, 2800), ("480p", 480, 1400), ("360p", 360, 800)];
-const SEGMENT_SECS: u32 = 2;
-const WINDOW: u32 = 10; // segments in the playlist (~20 s); older ones are deleted
+// Viewers sit a few segments behind the newest one, so segment length sets
+// the delay: 1 s segments → ~4 s glass-to-glass instead of ~10 s.
+const SEGMENT_SECS: u32 = 1;
+const WINDOW: u32 = 20; // segments in the playlist (~20 s); older ones are deleted
 const VIEWER_TTL: Duration = Duration::from_secs(30); // players heartbeat every 10 s
 const RECONNECT_SECS: u32 = 10; // after a broadcast ends, keep watching for the encoder to come back
 const MIN_RECORDING_SECS: f64 = 5.0; // shorter broadcasts (tests, false starts) aren't kept
